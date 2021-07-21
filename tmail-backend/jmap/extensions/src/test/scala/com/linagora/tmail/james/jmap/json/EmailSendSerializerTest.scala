@@ -1,17 +1,17 @@
 package com.linagora.tmail.james.jmap.json
 
-import com.linagora.tmail.james.jmap.json.Fixture.{MAILBOX_ID_FACTORY, MESSAGE_ID_FACTORY}
-import org.apache.james.jmap.json.EmailSetSerializer
+import com.linagora.tmail.james.jmap.json.Fixture.{ACCOUNT_ID, MESSAGE_ID_FACTORY, STATE}
+import com.linagora.tmail.james.jmap.model.{EmailSendCreationId, EmailSendCreationResponse, EmailSendId, EmailSendResponse}
+import eu.timepit.refined.auto._
+import org.apache.james.jmap.core.SetError.SetErrorDescription
+import org.apache.james.jmap.core.{Properties, SetError}
+import org.apache.james.jmap.mail.{BlobId, Email, EmailSubmissionId, ThreadId}
+import org.apache.james.mailbox.model.MessageId
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import play.api.libs.json.{JsValue, Json}
 
-
 class EmailSendSerializerTest {
-
-  private val emailSetSerializer: EmailSetSerializer = new EmailSetSerializer(MESSAGE_ID_FACTORY, MAILBOX_ID_FACTORY)
-
-  private val emailSendSerializer: EmailSendSerializer = new EmailSendSerializer(emailSetSerializer)
 
   @Test
   def deserializeEmailSendCreationCreateShouldSuccess(): Unit = {
@@ -47,12 +47,12 @@ class EmailSendSerializerTest {
         |    }
         |}""".stripMargin)
 
-    assertThat(emailSendSerializer.deserializeEmailSendCreationRequest(jsInput).isSuccess)
+    assertThat(EmailSendSerializer.deserializeEmailSendCreationRequest(jsInput).isSuccess)
       .isEqualTo(true)
   }
 
   @Test
-  def deserializerEmailSendRequestShouldSuccess(): Unit = {
+  def deserializeEmailSendRequestShouldSuccess(): Unit = {
     val jsInput: JsValue = Json.parse(
       s"""
          |{
@@ -100,7 +100,94 @@ class EmailSendSerializerTest {
          |    ]
          |}""".stripMargin)
 
-    assertThat(emailSendSerializer.deserializerEmailSendRequest(jsInput).isSuccess)
+    assertThat(EmailSendSerializer.deserializeEmailSendRequest(jsInput).isSuccess)
       .isEqualTo(true)
+  }
+
+  @Test
+  def serializeEmailSendResponseShouldSuccess(): Unit = {
+    val messageId1: MessageId = MESSAGE_ID_FACTORY.generate()
+    val messageId2: MessageId = MESSAGE_ID_FACTORY.generate()
+    val created: Map[EmailSendCreationId, EmailSendCreationResponse] = Map(
+      (EmailSendCreationId("isci1"),
+        EmailSendCreationResponse(
+          emailSendId = EmailSendId("emailSend1"),
+          emailSubmissionId = EmailSubmissionId("emailSubmissionId1"),
+          messageId = messageId1,
+          blobId = Some(BlobId("blob1")),
+          threadId = ThreadId("thread1"),
+          size = Email.sanitizeSize(11))),
+      (EmailSendCreationId("isci2"),
+        EmailSendCreationResponse(
+          emailSendId = EmailSendId("emailSend2"),
+          emailSubmissionId = EmailSubmissionId("emailSubmissionId2"),
+          messageId = messageId2,
+          blobId = None,
+          threadId = ThreadId("thread2"),
+          size = Email.sanitizeSize(22))))
+
+    val notCreated: Map[EmailSendCreationId, SetError] = Map(
+      (EmailSendCreationId("isci3"),
+        SetError(SetError.invalidArgumentValue, SetErrorDescription("des1"), None)),
+      (EmailSendCreationId("isci4"),
+        SetError(SetError.forbiddenFromValue, SetErrorDescription("des2"), Some(Properties("p1")))))
+
+    val emailSendResponse: EmailSendResponse = EmailSendResponse(
+      accountId = ACCOUNT_ID,
+      newState = STATE,
+      created = Some(created),
+      notCreated = Some(notCreated))
+    val actualValue: JsValue = EmailSendSerializer.serializeEmailSendResponse(emailSendResponse)
+
+    val expectedValue: JsValue = Json.parse(
+      s"""
+         |{
+         |    "accountId": "aHR0cHM6Ly93d3cuYmFzZTY0ZW5jb2RlLm9yZy8",
+         |    "newState": "6e0dd59d-660e-4d9b-b22f-0354479f47b4",
+         |    "created": [
+         |        [
+         |            "isci1",
+         |            {
+         |                "emailSendId": "emailSend1",
+         |                "emailSubmissionId": "emailSubmissionId1",
+         |                "messageId": "${messageId1.serialize()}",
+         |                "blobId": "blob1",
+         |                "threadId": "thread1",
+         |                "size": 11
+         |            }
+         |        ],
+         |        [
+         |            "isci2",
+         |            {
+         |                "emailSendId": "emailSend2",
+         |                "emailSubmissionId": "emailSubmissionId2",
+         |                "messageId": "${messageId2.serialize()}",
+         |                "threadId": "thread2",
+         |                "size": 22
+         |            }
+         |        ]
+         |    ],
+         |    "notCreated": [
+         |        [
+         |            "isci3",
+         |            {
+         |                "type": "invalidArguments",
+         |                "description": "des1"
+         |            }
+         |        ],
+         |        [
+         |            "isci4",
+         |            {
+         |                "type": "forbiddenFrom",
+         |                "description": "des2",
+         |                "properties": [
+         |                    "p1"
+         |                ]
+         |            }
+         |        ]
+         |    ]
+         |}""".stripMargin)
+    assertThat(actualValue)
+      .isEqualTo(expectedValue)
   }
 }

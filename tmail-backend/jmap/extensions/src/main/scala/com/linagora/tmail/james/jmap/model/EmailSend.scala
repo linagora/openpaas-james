@@ -1,17 +1,22 @@
 package com.linagora.tmail.james.jmap.model
 
 import cats.implicits.toTraverseOps
+import com.linagora.tmail.james.jmap.json.EmailSendSerializer
+import com.linagora.tmail.james.jmap.model.EmailSendCreationRequestRaw.{emailCreateAssignableProperties, emailSubmissionAssignableProperties}
+import eu.timepit.refined.auto._
 import eu.timepit.refined.refineV
 import org.apache.james.jmap.core.Id.{Id, IdConstraint}
+import org.apache.james.jmap.core.Properties.toProperties
 import org.apache.james.jmap.core.SetError.SetErrorDescription
 import org.apache.james.jmap.core.{AccountId, Id, Properties, SetError, UTCDate, UuidState}
+import org.apache.james.jmap.json.EmailSetSerializer
 import org.apache.james.jmap.mail.Email.Size
 import org.apache.james.jmap.mail.{BlobId, DestroyIds, EmailCreationRequest, EmailCreationResponse, EmailSet, EmailSetRequest, EmailSubmissionId, Envelope, ThreadId, UnparsedMessageId}
 import org.apache.james.jmap.method.WithAccountId
 import org.apache.james.mailbox.MessageManager.AppendCommand
 import org.apache.james.mailbox.model.MessageId
 import org.apache.james.mime4j.dom.Message
-import play.api.libs.json.{JsObject, JsPath, JsonValidationError}
+import play.api.libs.json.{JsError, JsObject, JsPath, JsSuccess, JsonValidationError}
 
 import java.time.ZonedDateTime
 import java.util.{Date, UUID}
@@ -70,7 +75,7 @@ case class EmailSendRequest(accountId: AccountId,
     }
   }
 
-  def implicitEmailSetRequest(messageIdResolver: EmailSendCreationId => Either[IllegalArgumentException, MessageId]) : Either[IllegalArgumentException, Option[EmailSetRequest]] =
+  def implicitEmailSetRequest(messageIdResolver: EmailSendCreationId => Either[IllegalArgumentException, Option[MessageId]]): Either[IllegalArgumentException, Option[EmailSetRequest]] =
     for {
       update <- resolveOnSuccessUpdateEmail(messageIdResolver)
       destroy <- resolveOnSuccessDestroyEmail(messageIdResolver)
@@ -86,30 +91,43 @@ case class EmailSendRequest(accountId: AccountId,
       }
     }
 
-  def resolveOnSuccessUpdateEmail(messageIdResolver: EmailSendCreationId => Either[IllegalArgumentException, MessageId]): Either[IllegalArgumentException, Option[Map[UnparsedMessageId, JsObject]]]=
+  def resolveOnSuccessUpdateEmail(messageIdResolver: EmailSendCreationId => Either[IllegalArgumentException, Option[MessageId]]): Either[IllegalArgumentException, Option[Map[UnparsedMessageId, JsObject]]] =
     onSuccessUpdateEmail.map(map => map.toList
       .map {
-        case (creationId, json) => messageIdResolver.apply(creationId).map(messageId => (EmailSet.asUnparsed(messageId), json))
+        case (creationId, json) => messageIdResolver.apply(creationId).map(msgOpt => msgOpt.map(messageId => (EmailSet.asUnparsed(messageId), json)))
       }
       .sequence
-      .map(list => list.toMap))
+      .map(list => list.flatten.toMap))
       .sequence
+      .map {
+        case Some(value) if value.isEmpty => None
+        case any => any
+      }
 
-  def resolveOnSuccessDestroyEmail(messageIdResolver: EmailSendCreationId => Either[IllegalArgumentException, MessageId]): Either[IllegalArgumentException, Option[List[UnparsedMessageId]]]=
+  def resolveOnSuccessDestroyEmail(messageIdResolver: EmailSendCreationId => Either[IllegalArgumentException, Option[MessageId]]): Either[IllegalArgumentException, Option[List[UnparsedMessageId]]] =
     onSuccessDestroyEmail.map(list => list
-      .map(creationId => messageIdResolver.apply(creationId).map(messageId => EmailSet.asUnparsed(messageId)))
-      .sequence)
+      .map(creationId => messageIdResolver.apply(creationId).map(messageIdOpt => messageIdOpt.map(messageId => EmailSet.asUnparsed(messageId))))
       .sequence
-
+      .map(list => list.flatten))
+      .sequence
 }
 
 object EmailSendCreationRequestInvalidException {
-  def parse(errors: collection.Seq[(JsPath, collection.Seq[JsonValidationError])]): EmailSendCreationRequestInvalidException = ???
+  def parse(errors: collection.Seq[(JsPath, collection.Seq[JsonValidationError])]): EmailSendCreationRequestInvalidException = {
+    val setError: SetError = errors.head match {
+      case (path, Seq()) => SetError.invalidArguments(SetErrorDescription(s"'$path' property in EmailSend object is not valid"))
+      case (path, Seq(JsonValidationError(Seq("error.path.missing")))) => SetError.invalidArguments(SetErrorDescription(s"Missing '$path' property in EmailSend object"))
+      case (path, Seq(JsonValidationError(Seq(message)))) => SetError.invalidArguments(SetErrorDescription(s"'$path' property in EmailSend object is not valid: $message"))
+      case (path, _) => SetError.invalidArguments(SetErrorDescription(s"Unknown error on property '$path'"))
+    }
+    EmailSendCreationRequestInvalidException(setError)
+  }
 }
+
 case class EmailSendCreationRequestInvalidException(error: SetError) extends Exception
 
 object EmailSendCreationRequest {
-  private val assignableProperties: Set[String] = ???
+  private val assignableProperties: Set[String] = Set("email/create", "emailSubmission/set")
 
   def validateProperties(jsObject: JsObject): Either[EmailSendCreationRequestInvalidException, JsObject] =
     jsObject.keys.diff(assignableProperties) match {
@@ -119,10 +137,57 @@ object EmailSendCreationRequest {
           Some(Properties.toProperties(unknownProperties.toSet)))))
       case _ => scala.Right(jsObject)
     }
-
 }
+
+object EmailSendCreationRequestRaw {
+  private val emailSubmissionAssignableProperties: Set[String] = Set("envelope", "identityId", "onSuccessUpdateEmail")
+  private val emailCreateAssignableProperties: Set[String] = Set("mailboxIds", "messageId", "references", "inReplyTo",
+    "from", "to", "cc", "bcc", "sender", "replyTo", "subject", "sentAt", "keywords", "receivedAt",
+    "htmlBody", "textBody", "bodyValues", "specificHeaders", "attachments")
+}
+
 case class EmailSendCreationRequest(emailCreate: EmailCreationRequest,
                                     emailSubmissionSet: EmailSubmissionCreationRequest)
+
+case class EmailSendCreationRequestRaw(emailCreate: JsObject,
+                                       emailSubmissionSet: JsObject) {
+
+  def validate(): Either[Exception, EmailSendCreationRequestRaw] =
+    validateEmailCreate()
+      .flatMap(_ => validateEmailSubmissionSet())
+
+  def validateEmailSubmissionSet(): Either[Exception, EmailSendCreationRequestRaw] =
+    emailSubmissionSet.keys.diff(emailSubmissionAssignableProperties) match {
+      case unknownProperties if unknownProperties.nonEmpty =>
+        Left(EmailSendCreationRequestInvalidException(SetError.invalidArguments(
+          SetErrorDescription("Some unknown properties were specified"),
+          Some(toProperties(unknownProperties.toSet)))))
+      case _ => scala.Right(this)
+    }
+
+  def validateEmailCreate(): Either[Exception, EmailSendCreationRequestRaw] =
+    emailCreate.keys.diff(emailCreateAssignableProperties) match {
+      case unknownProperties if unknownProperties.nonEmpty =>
+        Left(EmailSendCreationRequestInvalidException(SetError.invalidArguments(
+          SetErrorDescription("Some unknown properties were specified"),
+          Some(toProperties(unknownProperties.toSet)))))
+      case _ => scala.Right(this)
+    }
+
+  def toModel(emailSetSerializer: EmailSetSerializer): Either[EmailSendCreationRequestInvalidException, EmailSendCreationRequest] = {
+    val maybeEmailCreationRequest: Either[EmailSendCreationRequestInvalidException, EmailCreationRequest] =
+      emailSetSerializer.deserializeCreationRequest(emailCreate) match {
+        case JsSuccess(value, _) => scala.Right(value)
+        case JsError(errors) => Left(EmailSendCreationRequestInvalidException.parse(errors))
+      }
+
+    maybeEmailCreationRequest.flatMap(emailCreate =>
+      EmailSendSerializer.deserializeEmailCreationRequest(emailSubmissionSet) match {
+        case JsSuccess(value, _) => scala.Right(EmailSendCreationRequest(emailCreate, value))
+        case JsError(errors) => Left(EmailSendCreationRequestInvalidException.parse(errors))
+      })
+  }
+}
 
 case class EmailSubmissionCreationRequest(identityId: Option[Id],
                                           envelope: Option[Envelope])
@@ -133,7 +198,7 @@ object EmailSendId {
 
 case class EmailSendId(value: Id)
 
-case class EmailSendCreationResponse(id: EmailSendId,
+case class EmailSendCreationResponse(emailSendId: EmailSendId,
                                      emailSubmissionId: EmailSubmissionId,
                                      messageId: MessageId,
                                      blobId: Option[BlobId],
@@ -142,33 +207,61 @@ case class EmailSendCreationResponse(id: EmailSendId,
 
 trait EmailSetCreationResult
 
-case class EmailSetCreationSuccess(clientId: EmailSendCreationId, response: EmailCreationResponse) extends EmailSetCreationResult
+case class EmailSetCreationSuccess(clientId: EmailSendCreationId,
+                                   response: EmailCreationResponse,
+                                   originalMessage: Message) extends EmailSetCreationResult
 
 case class EmailSetCreationFailure(clientId: EmailSendCreationId, error: Throwable) extends EmailSetCreationResult
 
 
 object EmailSendResults {
-  def empty(): EmailSendResults = ???
+  def empty(): EmailSendResults = EmailSendResults(None, None, Map.empty)
 
-  def created(emailSendCreationId: EmailSendCreationId, emailSendCreationResponse: EmailSendCreationResponse): EmailSendResults=
-    EmailSendResults(Some(Map(emailSendCreationId -> emailSendCreationResponse)), None)
+  def created(emailSendCreationId: EmailSendCreationId, emailSendCreationResponse: EmailSendCreationResponse): EmailSendResults =
+    EmailSendResults(Some(Map(emailSendCreationId -> emailSendCreationResponse)),
+      None,
+      Map(emailSendCreationId -> emailSendCreationResponse.messageId))
 
-  def notCreated(emailSendCreationId: EmailSendCreationId,throwable: Throwable ): EmailSendResults = ???
+  def notCreated(emailSendCreationId: EmailSendCreationId, throwable: Throwable): EmailSendResults = {
+    val setError: SetError = throwable match {
+      case error: Throwable => SetError.serverFail(SetErrorDescription(error.getMessage))
+    }
+    EmailSendResults(None, Some(Map(emailSendCreationId -> setError)), Map.empty)
+  }
 
-  def merge(result1: EmailSendResults, result2: EmailSendResults): EmailSendResults = ???
+  def merge(result1: EmailSendResults, result2: EmailSendResults): EmailSendResults = EmailSendResults(
+    created = (result1.created ++ result2.created).reduceOption(_ ++ _),
+    notCreated = (result1.notCreated ++ result2.notCreated).reduceOption(_ ++ _),
+    creationIdResolver = result1.creationIdResolver ++ result2.creationIdResolver)
 }
 
 
-
 case class EmailSendResults(created: Option[Map[EmailSendCreationId, EmailSendCreationResponse]],
-                            notCreated: Option[Map[EmailSendCreationId, SetError]]) {
-  def asResponse(accountId: AccountId, newState: UuidState): EmailSendResponse =EmailSendResponse(
+                            notCreated: Option[Map[EmailSendCreationId, SetError]],
+                            creationIdResolver: Map[EmailSendCreationId, MessageId]) {
+  def asResponse(accountId: AccountId, newState: UuidState): EmailSendResponse = EmailSendResponse(
     accountId = accountId,
     newState = newState,
     created = created,
     notCreated = notCreated)
 
-  def resolveMessageId(creationId: EmailSendCreationId): Either[IllegalArgumentException, MessageId] = ???
+  def resolveMessageId(creationId: EmailSendCreationId): Either[IllegalArgumentException, Option[MessageId]] =
+    if (creationId.id.startsWith("#")) {
+      val realId: String = creationId.id.substring(1)
+      val validatedId: Either[IllegalArgumentException, EmailSendCreationId] = Id.validate(realId).map(id => EmailSendCreationId(id))
+      validatedId
+        .left.map(s => new IllegalArgumentException(s))
+        .flatMap(id => retrieveMessageId(id)
+          .map(id => scala.Right(Some(id))).getOrElse(scala.Right(None)))
+    } else {
+      Left(new IllegalArgumentException(s"${creationId.id} cannot be retrieved as storage for EmailSend is not yet implemented"))
+    }
+
+  private def retrieveMessageId(creationId: EmailSendCreationId): Option[MessageId] =
+    created.getOrElse(Map.empty).
+      filter(sentResult => sentResult._1.equals(creationId)).keys
+      .headOption
+      .flatMap(creationId => creationIdResolver.get(creationId))
 }
 
 case class EmailSendResponse(accountId: AccountId,

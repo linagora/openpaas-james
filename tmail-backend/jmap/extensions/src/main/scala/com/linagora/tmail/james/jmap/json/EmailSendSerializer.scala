@@ -1,18 +1,16 @@
 package com.linagora.tmail.james.jmap.json
 
-import com.linagora.tmail.james.jmap.model.{EmailSendCreationId, EmailSendCreationRequest, EmailSendRequest, EmailSendResponse, EmailSubmissionCreationRequest}
+import com.linagora.tmail.james.jmap.model.{EmailSendCreationId, EmailSendCreationRequestRaw, EmailSendCreationResponse, EmailSendId, EmailSendRequest, EmailSendResponse, EmailSubmissionCreationRequest}
 import org.apache.james.core.MailAddress
-import org.apache.james.jmap.core.Id
-import org.apache.james.jmap.json.EmailSetSerializer
-import org.apache.james.jmap.mail.{EmailCreationRequest, EmailSubmissionAddress, EmailSubmissionCreationId, Envelope}
+import org.apache.james.jmap.core.{Id, UuidState}
+import org.apache.james.jmap.mail.{BlobId, EmailSubmissionAddress, EmailSubmissionId, Envelope, ThreadId}
+import org.apache.james.mailbox.model.MessageId
 import play.api.libs.functional.syntax.toFunctionalBuilderOps
-import play.api.libs.json.{JsError, JsObject, JsPath, JsResult, JsString, JsSuccess, JsValue, Json, Reads}
+import play.api.libs.json.{Format, JsError, JsObject, JsPath, JsResult, JsString, JsSuccess, JsValue, Json, Reads, Writes}
 
-import javax.inject.Inject
 import scala.util.Try
 
-class EmailSendSerializer @Inject()(emailSetSerializer: EmailSetSerializer) {
-  private implicit val emailCreationRequestReads: Reads[EmailCreationRequest] = emailSetSerializer.emailCreationRequestReads
+object EmailSendSerializer {
 
   private implicit val mailAddressReads: Reads[MailAddress] = {
     case JsString(value) => Try(JsSuccess(new MailAddress(value)))
@@ -24,12 +22,12 @@ class EmailSendSerializer @Inject()(emailSetSerializer: EmailSetSerializer) {
   private implicit val envelopeReads: Reads[Envelope] = Json.reads[Envelope]
   private implicit val emailSubmissionCreationRequestReads: Reads[EmailSubmissionCreationRequest] = Json.reads[EmailSubmissionCreationRequest]
 
-  private implicit val emailSendCreationCreateReads: Reads[EmailSendCreationRequest] = (
-    (JsPath \ "email/create").read[EmailCreationRequest] and
-      (JsPath \ "emailSubmission/set").read[EmailSubmissionCreationRequest]
-    ) (EmailSendCreationRequest.apply _)
+  private implicit val emailSendCreationRequestRawReads: Reads[EmailSendCreationRequestRaw] = (
+    (JsPath \ "email/create").read[JsObject] and
+      (JsPath \ "emailSubmission/set").read[JsObject]
+    ) (EmailSendCreationRequestRaw.apply _)
 
-  private implicit val creationIdFormat: Reads[EmailSendCreationId] = Json.valueFormat[EmailSendCreationId]
+  private implicit val creationIdFormat: Format[EmailSendCreationId] = Json.valueFormat[EmailSendCreationId]
 
   private implicit val mapEmailSendCreationIdAndObjectReads: Reads[Map[EmailSendCreationId, JsObject]] =
     Reads.mapReads[EmailSendCreationId, JsObject] {
@@ -38,11 +36,25 @@ class EmailSendSerializer @Inject()(emailSetSerializer: EmailSetSerializer) {
 
   private implicit val emailSendRequestReads: Reads[EmailSendRequest] = Json.reads[EmailSendRequest]
 
-  def deserializeEmailSendCreationRequest(input: JsValue): JsResult[EmailSendCreationRequest] =
-    Json.fromJson[EmailSendCreationRequest](input)
+  private implicit val stateWrites: Writes[UuidState] = Json.valueWrites[UuidState]
+  private implicit val blobIdWrites: Writes[BlobId] = Json.valueWrites[BlobId]
+  private implicit val threadIdWrites: Writes[ThreadId] = Json.valueWrites[ThreadId]
+  private implicit val emailSendIdWrites: Writes[EmailSendId] = Json.valueWrites[EmailSendId]
+  private implicit val emailSubmissionIdWrites: Writes[EmailSubmissionId] = Json.valueWrites[EmailSubmissionId]
+  private implicit val messageIdWrites: Writes[MessageId] = messageId => JsString(messageId.serialize)
+  private implicit val emailSendCreationResponseWrites: Writes[EmailSendCreationResponse] = Json.writes[EmailSendCreationResponse]
+  private implicit val emailSendResponseWrites: Writes[EmailSendResponse] = Json.writes[EmailSendResponse]
 
-  def deserializerEmailSendRequest(input: JsValue): JsResult[EmailSendRequest] =
+  def deserializeEmailSendCreationRequest(input: JsValue): JsResult[EmailSendCreationRequestRaw] =
+    Json.fromJson[EmailSendCreationRequestRaw](input)
+
+  def deserializeEmailSendRequest(input: JsValue): JsResult[EmailSendRequest] =
     Json.fromJson[EmailSendRequest](input)
 
-  def serializerEmailSendResponse(emailSendResponse: EmailSendResponse) : JsValue = ???
+  def deserializeEmailCreationRequest(input: JsValue): JsResult[EmailSubmissionCreationRequest] =
+    Json.fromJson[EmailSubmissionCreationRequest](input)
+
+  def serializeEmailSendResponse(emailSendResponse: EmailSendResponse): JsValue =
+    Json.toJson(emailSendResponse)
+
 }

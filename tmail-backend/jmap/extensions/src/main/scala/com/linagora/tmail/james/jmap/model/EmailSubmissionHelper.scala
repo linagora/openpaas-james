@@ -6,6 +6,7 @@ import org.apache.james.jmap.mail.{EmailSubmissionAddress, Envelope}
 import org.apache.james.jmap.method.MessageMimeMessageSource
 import org.apache.james.lifecycle.api.LifecycleUtil
 import org.apache.james.mailbox.model.MessageResult
+import org.apache.james.mime4j.dom.Message
 import org.apache.james.server.core.MimeMessageWrapper
 
 import javax.mail.Address
@@ -37,12 +38,5 @@ object EmailSubmissionHelper {
     }
   }
 
-  def toMimeMessage(name: String, message: MessageResult): Try[MimeMessageWrapper] = {
-    val source: MessageMimeMessageSource = MessageMimeMessageSource(name, message)
-    Try(new MimeMessageWrapper(source))
-      .recover(e => {
-        LifecycleUtil.dispose(source)
-        throw e
-      })
-  }
+
 }

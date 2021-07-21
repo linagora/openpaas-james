@@ -1,31 +1,33 @@
 package com.linagora.tmail.james.jmap.method
 
-import com.google.inject.AbstractModule
-import com.google.inject.multibindings.Multibinder
+import com.google.inject.multibindings.{Multibinder, ProvidesIntoSet}
+import com.google.inject.{AbstractModule, Scopes}
 import com.linagora.tmail.james.jmap.json.EmailSendSerializer
 import com.linagora.tmail.james.jmap.method.CapabilityIdentifier.LINAGORA_PGP
-import com.linagora.tmail.james.jmap.model.EmailSubmissionHelper.{resolveEnvelope, toMimeMessage}
+import com.linagora.tmail.james.jmap.model.EmailSubmissionHelper.resolveEnvelope
 import com.linagora.tmail.james.jmap.model.{EmailSendCreationId, EmailSendCreationRequest, EmailSendCreationRequestInvalidException, EmailSendCreationResponse, EmailSendId, EmailSendRequest, EmailSendResults, EmailSetCreationFailure, EmailSetCreationResult, EmailSetCreationSuccess, EmailSubmissionCreationRequest}
 import eu.timepit.refined.auto._
 import org.apache.james.core.{MailAddress, Username}
 import org.apache.james.jmap.core.CapabilityIdentifier.{CapabilityIdentifier, EMAIL_SUBMISSION, JMAP_CORE, JMAP_MAIL}
 import org.apache.james.jmap.core.Invocation.{Arguments, MethodName}
 import org.apache.james.jmap.core.{Invocation, UTCDate, UuidState}
-import org.apache.james.jmap.json.ResponseSerializer
+import org.apache.james.jmap.json.{EmailSetSerializer, ResponseSerializer}
 import org.apache.james.jmap.mail.{BlobId, Email, EmailCreationRequest, EmailCreationResponse, EmailSubmissionId, Envelope, ThreadId}
 import org.apache.james.jmap.method.EmailSubmissionSetMethod.{LOGGER, MAIL_METADATA_USERNAME_ATTRIBUTE}
-import org.apache.james.jmap.method.{EmailSetMethod, ForbiddenFromException, ForbiddenMailFromException, InvocationWithContext, MessageNotFoundException, Method, MethodRequiringAccountId, NoRecipientException}
+import org.apache.james.jmap.method.{EmailSetMethod, ForbiddenFromException, ForbiddenMailFromException, InvocationWithContext, Method, MethodRequiringAccountId, NoRecipientException}
 import org.apache.james.jmap.routes.{BlobResolvers, ProcessingContext, SessionSupplier}
+import org.apache.james.lifecycle.api.Startable
 import org.apache.james.mailbox.MessageManager.AppendCommand
-import org.apache.james.mailbox.model.{FetchGroup, MailboxId, MessageId}
-import org.apache.james.mailbox.{MailboxManager, MailboxSession, MessageIdManager}
+import org.apache.james.mailbox.model.{MailboxId, MessageId}
+import org.apache.james.mailbox.{MailboxManager, MailboxSession}
 import org.apache.james.metrics.api.MetricFactory
 import org.apache.james.mime4j.dom.Message
 import org.apache.james.queue.api.MailQueueFactory.SPOOL
 import org.apache.james.queue.api.{MailQueue, MailQueueFactory}
 import org.apache.james.rrt.api.CanSendFrom
-import org.apache.james.server.core.MailImpl
+import org.apache.james.server.core.{MailImpl, MimeMessageWrapper}
 import org.apache.james.util.html.HtmlTextExtractor
+import org.apache.james.utils.{InitializationOperation, InitilizationOperationBuilder}
 import org.apache.mailet.{Attribute, AttributeValue}
 import org.reactivestreams.Publisher
 import play.api.libs.json.{JsError, JsObject, JsSuccess}
@@ -41,16 +43,25 @@ import javax.mail.internet.{InternetAddress, MimeMessage}
 import scala.jdk.CollectionConverters._
 import scala.util.{Failure, Success, Try}
 
-class EncryptedEmailFastViewGetMethodModule extends AbstractModule {
+class EmailSendMethodModule extends AbstractModule {
   override def configure(): Unit = {
+    bind(classOf[EmailSendMethod]).in(Scopes.SINGLETON)
+
     Multibinder.newSetBinder(binder(), classOf[Method])
       .addBinding()
       .to(classOf[EmailSendMethod])
   }
+
+  @ProvidesIntoSet
+  def initEmailSends(instance: EmailSendMethod): InitializationOperation = {
+    InitilizationOperationBuilder.forClass(classOf[EmailSendMethod])
+      .init(new org.apache.james.utils.InitilizationOperationBuilder.Init() {
+        override def init(): Unit = instance.init
+      })
+  }
 }
 
-class EmailSendMethod @Inject()(serializer: EmailSendSerializer,
-                                messageIdManager: MessageIdManager,
+class EmailSendMethod @Inject()(emailSetSerializer: EmailSetSerializer,
                                 mailQueueFactory: MailQueueFactory[_ <: MailQueue],
                                 canSendFrom: CanSendFrom,
                                 blobResolvers: BlobResolvers,
@@ -58,7 +69,7 @@ class EmailSendMethod @Inject()(serializer: EmailSendSerializer,
                                 mailboxManager: MailboxManager,
                                 emailSetMethod: EmailSetMethod,
                                 val metricFactory: MetricFactory,
-                                val sessionSupplier: SessionSupplier) extends MethodRequiringAccountId[EmailSendRequest] {
+                                val sessionSupplier: SessionSupplier) extends MethodRequiringAccountId[EmailSendRequest] with Startable {
 
   override val methodName: MethodName = MethodName("Email/send")
 
@@ -73,29 +84,28 @@ class EmailSendMethod @Inject()(serializer: EmailSendSerializer,
       .recover(e => LOGGER.debug("error closing queue", e))
 
   override def getRequest(mailboxSession: MailboxSession,
-                          invocation: Invocation): Either[Exception, EmailSendRequest] = {
-    serializer.deserializerEmailSendRequest(invocation.arguments.value) match {
+                          invocation: Invocation): Either[Exception, EmailSendRequest] =
+    EmailSendSerializer.deserializeEmailSendRequest(invocation.arguments.value) match {
       case JsSuccess(emailSendRequest, _) => emailSendRequest.validate
       case errors: JsError => Left(new IllegalArgumentException(ResponseSerializer.serialize(errors).toString))
     }
-  }
 
   override def doProcess(capabilities: Set[CapabilityIdentifier],
                          invocation: InvocationWithContext,
                          mailboxSession: MailboxSession,
                          request: EmailSendRequest): Publisher[InvocationWithContext] =
     create(request, mailboxSession, invocation.processingContext)
-      .flatMapMany(createdResults => {
+      .flatMapMany(createResults => {
         val explicitInvocation: InvocationWithContext = InvocationWithContext(
           invocation = Invocation(
             methodName = invocation.invocation.methodName,
-            arguments = Arguments(serializer.serializerEmailSendResponse(
-              createdResults._1.asResponse(request.accountId, UuidState.INSTANCE))
+            arguments = Arguments(EmailSendSerializer.serializeEmailSendResponse(
+              createResults._1.asResponse(request.accountId, UuidState.INSTANCE))
               .as[JsObject]),
             methodCallId = invocation.invocation.methodCallId),
-          processingContext = createdResults._2)
+          processingContext = createResults._2)
 
-        val emailSetCall: SMono[InvocationWithContext] = request.implicitEmailSetRequest(createdResults._1.resolveMessageId)
+        val emailSetCall: SMono[InvocationWithContext] = request.implicitEmailSetRequest(createResults._1.resolveMessageId)
           .fold(e => SMono.error(e),
             maybeEmailSetRequest => maybeEmailSetRequest.map(emailSetRequest => emailSetMethod.doProcess(
               capabilities = capabilities,
@@ -141,15 +151,19 @@ class EmailSendMethod @Inject()(serializer: EmailSendSerializer,
     createEmail(clientId, mailboxSession, request.emailCreate)
       .flatMap {
         case failure: EmailSetCreationFailure => SMono.error(failure.error)
-        case success: EmailSetCreationSuccess => createEmailSubmission(mailboxSession, success.response, request.emailSubmissionSet)
+        case success: EmailSetCreationSuccess => createEmailSubmission(
+          mailboxSession,
+          success.response,
+          success.originalMessage,
+          request.emailSubmissionSet)
       }
 
-  private def parseCreationRequest(jsObject: JsObject): Either[Exception, EmailSendCreationRequest] =
-  EmailSendCreationRequest.validateProperties(jsObject)
-    .flatMap(validJson => serializer.deserializeEmailSendCreationRequest(validJson) match {
-      case JsSuccess(createRequest, _) => Right(createRequest)
-      case JsError(errors) => Left(EmailSendCreationRequestInvalidException.parse(errors))
-    })
+  private def parseCreationRequest(jsObject: JsObject): Either[EmailSendCreationRequestInvalidException, EmailSendCreationRequest] =
+    EmailSendCreationRequest.validateProperties(jsObject)
+      .flatMap(validJson => EmailSendSerializer.deserializeEmailSendCreationRequest(validJson) match {
+        case JsSuccess(createRequest, _) => createRequest.toModel(emailSetSerializer)
+        case JsError(errors) => Left(EmailSendCreationRequestInvalidException.parse(errors))
+      })
 
   def createEmail(clientId: EmailSendCreationId,
                   mailboxSession: MailboxSession,
@@ -168,15 +182,13 @@ class EmailSendMethod @Inject()(serializer: EmailSendSerializer,
 
   def createEmailSubmission(mailboxSession: MailboxSession,
                             emailCreationResponse: EmailCreationResponse,
+                            originalMessage: Message,
                             request: EmailSubmissionCreationRequest): SMono[EmailSendCreationResponse] = {
     val emailId: MessageId = emailCreationResponse.id
+    val submissionId: EmailSubmissionId = EmailSubmissionId.generate
+    val emailSendId: EmailSendId = EmailSendId.generate
     for {
-      message <- SFlux(messageIdManager.getMessagesReactive(List(emailId).asJava, FetchGroup.FULL_CONTENT, mailboxSession))
-        .next
-        .switchIfEmpty(SMono.error(MessageNotFoundException(emailId)))
-      submissionId = EmailSubmissionId.generate
-      emailSendId = EmailSendId.generate
-      message <- SMono.fromTry(toMimeMessage(submissionId.value.value, message))
+      message <- SMono.fromTry(toMimeMessage(submissionId.value, originalMessage))
       envelope <- SMono.fromTry(resolveEnvelope(message, request.envelope))
       _ <- SMono.fromTry(validate(mailboxSession)(message, envelope))
       mail <- SMono.fromCallable(() => {
@@ -192,13 +204,17 @@ class EmailSendMethod @Inject()(serializer: EmailSendSerializer,
       _ <- SMono(queue.enqueueReactive(mail)).`then`(SMono.just(submissionId))
     } yield {
       EmailSendCreationResponse(
-        id = emailSendId,
+        emailSendId = emailSendId,
         emailSubmissionId = submissionId,
         messageId = emailId,
         blobId = emailCreationResponse.blobId,
         threadId = emailCreationResponse.threadId,
         size = emailCreationResponse.size)
     }
+  }
+
+  def toMimeMessage(name: String, message: Message): Try[MimeMessageWrapper] = {
+    ??? //todo
   }
 
   private def validate(session: MailboxSession)(mimeMessage: MimeMessage, envelope: Envelope): Try[MimeMessage] = {
@@ -220,21 +236,20 @@ class EmailSendMethod @Inject()(serializer: EmailSendSerializer,
                      request: EmailCreationRequest,
                      message: Message,
                      mailboxSession: MailboxSession,
-                     mailboxIds: List[MailboxId]): SMono[EmailSetCreationSuccess] = {
-    val appendCommand: AppendCommand = AppendCommand.builder()
-      .recent()
-      .withFlags(request.keywords.map(_.asFlags).getOrElse(new Flags()))
-      .withInternalDate(Date.from(request.receivedAt.getOrElse(UTCDate(ZonedDateTime.now())).asUTC.toInstant))
-      .build(message)
-
+                     mailboxIds: List[MailboxId]): SMono[EmailSetCreationSuccess] =
     for {
       mailbox <- SMono(mailboxManager.getMailboxReactive(mailboxIds.head, mailboxSession))
+      appendCommand = AppendCommand.builder()
+        .recent()
+        .withFlags(request.keywords.map(_.asFlags).getOrElse(new Flags()))
+        .withInternalDate(Date.from(request.receivedAt.getOrElse(UTCDate(ZonedDateTime.now())).asUTC.toInstant))
+        .build(message)
       appendResult <- SMono(mailbox.appendMessageReactive(appendCommand, mailboxSession))
     } yield {
       val blobId: Option[BlobId] = BlobId.of(appendResult.getId.getMessageId).toOption
       val threadId: ThreadId = ThreadId.fromJava(appendResult.getThreadId)
-      EmailSetCreationSuccess(clientId, EmailCreationResponse(appendResult.getId.getMessageId, blobId, threadId, Email.sanitizeSize(appendResult.getSize)))
+      EmailSetCreationSuccess(clientId,
+        EmailCreationResponse(appendResult.getId.getMessageId, blobId, threadId, Email.sanitizeSize(appendResult.getSize)),
+        message)
     }
-  }
 }
-
