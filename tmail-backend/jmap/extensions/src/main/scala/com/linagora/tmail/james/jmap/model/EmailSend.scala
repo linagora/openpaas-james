@@ -155,11 +155,11 @@ case class EmailSendCreationRequest(emailCreate: EmailCreationRequest,
 case class EmailSendCreationRequestRaw(emailCreate: JsObject,
                                        emailSubmissionSet: JsObject) {
 
-  def validate(): Either[Exception, EmailSendCreationRequestRaw] =
+  def validate(): Either[EmailSendCreationRequestInvalidException, EmailSendCreationRequestRaw] =
     validateEmailCreate()
       .flatMap(_ => validateEmailSubmissionSet())
 
-  def validateEmailSubmissionSet(): Either[Exception, EmailSendCreationRequestRaw] =
+  def validateEmailSubmissionSet(): Either[EmailSendCreationRequestInvalidException, EmailSendCreationRequestRaw] =
     emailSubmissionSet.keys.diff(emailSubmissionAssignableProperties) match {
       case unknownProperties if unknownProperties.nonEmpty =>
         Left(EmailSendCreationRequestInvalidException(SetError.invalidArguments(
@@ -168,7 +168,7 @@ case class EmailSendCreationRequestRaw(emailCreate: JsObject,
       case _ => scala.Right(this)
     }
 
-  def validateEmailCreate(): Either[Exception, EmailSendCreationRequestRaw] =
+  def validateEmailCreate(): Either[EmailSendCreationRequestInvalidException, EmailSendCreationRequestRaw] =
     emailCreate.keys.diff(emailCreateAssignableProperties) match {
       case unknownProperties if unknownProperties.nonEmpty =>
         Left(EmailSendCreationRequestInvalidException(SetError.invalidArguments(
@@ -195,15 +195,10 @@ case class EmailSendCreationRequestRaw(emailCreate: JsObject,
 case class EmailSubmissionCreationRequest(identityId: Option[Id],
                                           envelope: Option[Envelope])
 
-object EmailSendId {
-  def generate: EmailSendId = EmailSendId(Id.validate(UUID.randomUUID().toString).toOption.get)
-}
-
 case class EmailSendId(value: Id)
 
-case class EmailSendCreationResponse(emailSendId: EmailSendId,
-                                     emailSubmissionId: EmailSubmissionId,
-                                     messageId: MessageId,
+case class EmailSendCreationResponse(emailSubmissionId: EmailSubmissionId,
+                                     emailId: MessageId,
                                      blobId: Option[BlobId],
                                      threadId: ThreadId,
                                      size: Size)
@@ -212,7 +207,7 @@ trait EmailSetCreationResult
 
 case class EmailSetCreationSuccess(clientId: EmailSendCreationId,
                                    response: EmailCreationResponse,
-                                   originalMessage: Message) extends EmailSetCreationResult
+                                   originalMessage: Array[Byte]) extends EmailSetCreationResult
 
 case class EmailSetCreationFailure(clientId: EmailSendCreationId, error: Throwable) extends EmailSetCreationResult
 
@@ -223,10 +218,11 @@ object EmailSendResults {
   def created(emailSendCreationId: EmailSendCreationId, emailSendCreationResponse: EmailSendCreationResponse): EmailSendResults =
     EmailSendResults(Some(Map(emailSendCreationId -> emailSendCreationResponse)),
       None,
-      Map(emailSendCreationId -> emailSendCreationResponse.messageId))
+      Map(emailSendCreationId -> emailSendCreationResponse.emailId))
 
   def notCreated(emailSendCreationId: EmailSendCreationId, throwable: Throwable): EmailSendResults = {
     val setError: SetError = throwable match {
+      case invalidException: EmailSendCreationRequestInvalidException =>invalidException.error
       case error: Throwable => SetError.serverFail(SetErrorDescription(error.getMessage))
     }
     EmailSendResults(None, Some(Map(emailSendCreationId -> setError)), Map.empty)
@@ -272,9 +268,9 @@ case class EmailSendResponse(accountId: AccountId,
                              created: Option[Map[EmailSendCreationId, EmailSendCreationResponse]],
                              notCreated: Option[Map[EmailSendCreationId, SetError]])
 
-case class MimeMessageSourceImpl(name: String, message: Message) extends MimeMessageSource {
+case class MimeMessageSourceImpl(name: String, message: Array[Byte]) extends MimeMessageSource {
 
   override def getSourceId: String = name
 
-  override def getInputStream: InputStream = new ByteArrayInputStream(DefaultMessageWriter.asBytes(message))
+  override def getInputStream: InputStream = new ByteArrayInputStream(message)
 }

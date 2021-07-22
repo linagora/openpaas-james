@@ -1,7 +1,7 @@
 package com.linagora.tmail.james.jmap.json
 
 import com.linagora.tmail.james.jmap.json.Fixture.{ACCOUNT_ID, MESSAGE_ID_FACTORY, STATE}
-import com.linagora.tmail.james.jmap.model.{EmailSendCreationId, EmailSendCreationResponse, EmailSendId, EmailSendResponse}
+import com.linagora.tmail.james.jmap.model.{EmailSendCreationId, EmailSendCreationResponse, EmailSendResponse}
 import eu.timepit.refined.auto._
 import org.apache.james.jmap.core.SetError.SetErrorDescription
 import org.apache.james.jmap.core.{Properties, SetError}
@@ -111,17 +111,15 @@ class EmailSendSerializerTest {
     val created: Map[EmailSendCreationId, EmailSendCreationResponse] = Map(
       (EmailSendCreationId("isci1"),
         EmailSendCreationResponse(
-          emailSendId = EmailSendId("emailSend1"),
           emailSubmissionId = EmailSubmissionId("emailSubmissionId1"),
-          messageId = messageId1,
+          emailId = messageId1,
           blobId = Some(BlobId("blob1")),
           threadId = ThreadId("thread1"),
           size = Email.sanitizeSize(11))),
       (EmailSendCreationId("isci2"),
         EmailSendCreationResponse(
-          emailSendId = EmailSendId("emailSend2"),
           emailSubmissionId = EmailSubmissionId("emailSubmissionId2"),
-          messageId = messageId2,
+          emailId = messageId2,
           blobId = None,
           threadId = ThreadId("thread2"),
           size = Email.sanitizeSize(22))))
@@ -140,52 +138,37 @@ class EmailSendSerializerTest {
     val actualValue: JsValue = EmailSendSerializer.serializeEmailSendResponse(emailSendResponse)
 
     val expectedValue: JsValue = Json.parse(
-      s"""
-         |{
+      s"""{
          |    "accountId": "aHR0cHM6Ly93d3cuYmFzZTY0ZW5jb2RlLm9yZy8",
          |    "newState": "6e0dd59d-660e-4d9b-b22f-0354479f47b4",
-         |    "created": [
-         |        [
-         |            "isci1",
-         |            {
-         |                "emailSendId": "emailSend1",
-         |                "emailSubmissionId": "emailSubmissionId1",
-         |                "messageId": "${messageId1.serialize()}",
-         |                "blobId": "blob1",
-         |                "threadId": "thread1",
-         |                "size": 11
-         |            }
-         |        ],
-         |        [
-         |            "isci2",
-         |            {
-         |                "emailSendId": "emailSend2",
-         |                "emailSubmissionId": "emailSubmissionId2",
-         |                "messageId": "${messageId2.serialize()}",
-         |                "threadId": "thread2",
-         |                "size": 22
-         |            }
-         |        ]
-         |    ],
-         |    "notCreated": [
-         |        [
-         |            "isci3",
-         |            {
-         |                "type": "invalidArguments",
-         |                "description": "des1"
-         |            }
-         |        ],
-         |        [
-         |            "isci4",
-         |            {
-         |                "type": "forbiddenFrom",
-         |                "description": "des2",
-         |                "properties": [
-         |                    "p1"
-         |                ]
-         |            }
-         |        ]
-         |    ]
+         |    "created": {
+         |        "isci1": {
+         |            "emailSubmissionId": "emailSubmissionId1",
+         |            "emailId": "${messageId1.serialize()}",
+         |            "blobId": "blob1",
+         |            "threadId": "thread1",
+         |            "size": 11
+         |        },
+         |        "isci2": {
+         |            "emailSubmissionId": "emailSubmissionId2",
+         |            "emailId": "${messageId2.serialize()}",
+         |            "threadId": "thread2",
+         |            "size": 22
+         |        }
+         |    },
+         |    "notCreated": {
+         |        "isci3": {
+         |            "type": "invalidArguments",
+         |            "description": "des1"
+         |        },
+         |        "isci4": {
+         |            "type": "forbiddenFrom",
+         |            "description": "des2",
+         |            "properties": [
+         |                "p1"
+         |            ]
+         |        }
+         |    }
          |}""".stripMargin)
     assertThat(actualValue)
       .isEqualTo(expectedValue)

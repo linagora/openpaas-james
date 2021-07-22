@@ -7,6 +7,7 @@ import io.restassured.RestAssured.{`given`, requestSpecification}
 import io.restassured.http.ContentType.JSON
 import io.restassured.specification.RequestSpecification
 import net.javacrumbs.jsonunit.assertj.JsonAssertions.assertThatJson
+import net.javacrumbs.jsonunit.core.Option
 import org.apache.http.HttpStatus
 import org.apache.http.HttpStatus.SC_CREATED
 import org.apache.james.GuiceJamesServer
@@ -91,7 +92,7 @@ trait LinagoraEmailSendMethodContract {
       .flatMap(messageId => guiceJamesServer.getProbe(classOf[MessageIdProbe]).getMessages(messageId, username).asScala.headOption)
       .toList
 
-  private def generateRequestBobSendMailToAndre(server: GuiceJamesServer): String =
+  private def bobSendsAMailToAndre(server: GuiceJamesServer): String =
     s"""
        |{
        |  "using": [
@@ -155,7 +156,7 @@ trait LinagoraEmailSendMethodContract {
     server.getProbe(classOf[MailboxProbeImpl]).createMailbox(MailboxPath.inbox(ANDRE))
 
     val response: String = `given`
-      .body(generateRequestBobSendMailToAndre(server))
+      .body(bobSendsAMailToAndre(server))
     .when()
       .post()
     .`then`
@@ -176,19 +177,15 @@ trait LinagoraEmailSendMethodContract {
            |            {
            |                "accountId": "$ACCOUNT_ID",
            |                "newState": "$${json-unit.ignore}",
-           |                "created": [
-           |                    [
-           |                        "K87",
-           |                        {
-           |                            "emailSendId": "$${json-unit.ignore}",
-           |                            "emailSubmissionId": "$${json-unit.ignore}",
-           |                            "messageId": "$${json-unit.ignore}",
-           |                            "blobId": "$${json-unit.ignore}",
-           |                            "threadId": "$${json-unit.ignore}",
-           |                            "size": "$${json-unit.ignore}"
-           |                        }
-           |                    ]
-           |                ]
+           |                "created": {
+           |                    "K87": {
+           |                        "emailSubmissionId": "$${json-unit.ignore}",
+           |                        "emailId": "$${json-unit.ignore}",
+           |                        "blobId": "$${json-unit.ignore}",
+           |                        "threadId": "$${json-unit.ignore}",
+           |                        "size": "$${json-unit.ignore}"
+           |                    }
+           |                }
            |            },
            |            "c1"
            |        ]
@@ -201,7 +198,7 @@ trait LinagoraEmailSendMethodContract {
     server.getProbe(classOf[MailboxProbeImpl]).createMailbox(MailboxPath.inbox(ANDRE))
 
     `given`
-      .body(generateRequestBobSendMailToAndre(server))
+      .body(bobSendsAMailToAndre(server))
     .when()
       .post()
     .`then`
@@ -211,14 +208,13 @@ trait LinagoraEmailSendMethodContract {
       .body()
       .asString()
 
-    val listBobMessageResult: List[MessageResult] = listAllMessageResult(server, BOB )
-
-    assertSoftly(softly => {
-      softly.assertThat(listBobMessageResult.size)
-        .isEqualTo(1)
-      softly.assertThat(listBobMessageResult.head.getMailboxId)
+    awaitAtMostTenSeconds.untilAsserted { () =>
+      val listBobMessageResult: List[MessageResult] = listAllMessageResult(server, BOB )
+      assertThat(listBobMessageResult.size).
+        isEqualTo(1)
+      assertThat(listBobMessageResult.head.getMailboxId)
         .isEqualTo(getBobInboxId(server))
-    })
+    }
   }
 
   @Test
@@ -227,7 +223,7 @@ trait LinagoraEmailSendMethodContract {
       .createMailbox(MailboxPath.inbox(ANDRE))
 
     `given`
-      .body(generateRequestBobSendMailToAndre(server))
+      .body(bobSendsAMailToAndre(server))
     .when()
       .post()
     .`then`
@@ -240,12 +236,11 @@ trait LinagoraEmailSendMethodContract {
     awaitAtMostTenSeconds.untilAsserted { () =>
       val listAndreMessageResult: List[MessageResult] = listAllMessageResult(server, ANDRE )
 
-      assertSoftly(softly => {
-        softly.assertThat(listAndreMessageResult.size)
-          .isEqualTo(1)
-        softly.assertThat(listAndreMessageResult.head.getMailboxId)
-          .isEqualTo(andreInboxId)
-      })
+      assertThat(listAndreMessageResult.size)
+        .isEqualTo(1)
+
+      assertThat(listAndreMessageResult.head.getMailboxId)
+        .isEqualTo(andreInboxId)
     }
   }
 
@@ -254,7 +249,7 @@ trait LinagoraEmailSendMethodContract {
     server.getProbe(classOf[MailboxProbeImpl]).createMailbox(MailboxPath.inbox(ANDRE))
 
     `given`
-      .body(generateRequestBobSendMailToAndre(server))
+      .body(bobSendsAMailToAndre(server))
     .when()
       .post()
     .`then`
@@ -266,6 +261,9 @@ trait LinagoraEmailSendMethodContract {
 
     awaitAtMostTenSeconds.untilAsserted { () =>
       val listAndreMessageResult: List[MessageResult] = listAllMessageResult(server, ANDRE )
+
+      assertThat(listAndreMessageResult.nonEmpty)
+        .isEqualTo(true)
 
       val andreRequest: String =
         s"""{
@@ -300,13 +298,13 @@ trait LinagoraEmailSendMethodContract {
             s"""{
                |    "2": {
                |        "value": "$HTML_BODY",
-               |        "isEncodingProblem": "$${json-unit.ignore}",
-               |        "isTruncated": "$${json-unit.ignore}"
+               |        "isEncodingProblem": false,
+               |        "isTruncated": false
                |    },
                |    "3": {
                |        "value": "I have the most brilliant plan. Let me tell you all about it. What we do is, we",
-               |        "isEncodingProblem": "$${json-unit.ignore}",
-               |        "isTruncated": "$${json-unit.ignore}"
+               |        "isEncodingProblem": false,
+               |        "isTruncated": false
                |    }
                |}""".stripMargin)
       }
@@ -431,15 +429,15 @@ trait LinagoraEmailSendMethodContract {
     val messageIds: collection.Seq[JsValue] = ((Json.parse(response)
       \\ "methodResponses")
       .head \\ "created" )
-      .head  \\ "messageId"
+      .head  \\ "emailId"
     val k87MessageId: String = messageIds.head.asInstanceOf[JsString].value
     val k88MessageId: String = messageIds(1).asInstanceOf[JsString].value
     val k89MessageId: String = messageIds(2).asInstanceOf[JsString].value
 
     assertThatJson(response)
+      .when(Option.IGNORING_ARRAY_ORDER)
       .isEqualTo(
-        s"""
-           |{
+        s"""{
            |    "sessionState": "${SESSION_STATE.value}",
            |    "methodResponses": [
            |        [
@@ -447,41 +445,29 @@ trait LinagoraEmailSendMethodContract {
            |            {
            |                "accountId": "$ACCOUNT_ID",
            |                "newState": "$${json-unit.ignore}",
-           |                "created": [
-           |                    [
-           |                        "K87",
-           |                        {
-           |                            "emailSendId": "$${json-unit.ignore}",
-           |                            "emailSubmissionId": "$${json-unit.ignore}",
-           |                            "messageId": "$${json-unit.ignore}",
-           |                            "blobId": "$${json-unit.ignore}",
-           |                            "threadId": "$${json-unit.ignore}",
-           |                            "size": "$${json-unit.ignore}"
-           |                        }
-           |                    ],
-           |                    [
-           |                        "K88",
-           |                        {
-           |                            "emailSendId": "$${json-unit.ignore}",
-           |                            "emailSubmissionId": "$${json-unit.ignore}",
-           |                            "messageId": "$${json-unit.ignore}",
-           |                            "blobId": "$${json-unit.ignore}",
-           |                            "threadId": "$${json-unit.ignore}",
-           |                            "size": "$${json-unit.ignore}"
-           |                        }
-           |                    ],
-           |                    [
-           |                        "K89",
-           |                        {
-           |                            "emailSendId": "$${json-unit.ignore}",
-           |                            "emailSubmissionId": "$${json-unit.ignore}",
-           |                            "messageId": "$${json-unit.ignore}",
-           |                            "blobId": "$${json-unit.ignore}",
-           |                            "threadId": "$${json-unit.ignore}",
-           |                            "size": "$${json-unit.ignore}"
-           |                        }
-           |                    ]
-           |                ]
+           |                "created": {
+           |                    "K87": {
+           |                        "emailSubmissionId": "$${json-unit.ignore}",
+           |                        "emailId": "$${json-unit.ignore}",
+           |                        "blobId": "$${json-unit.ignore}",
+           |                        "threadId": "$${json-unit.ignore}",
+           |                        "size": "$${json-unit.ignore}"
+           |                    },
+           |                    "K88": {
+           |                        "emailSubmissionId": "$${json-unit.ignore}",
+           |                        "emailId": "$${json-unit.ignore}",
+           |                        "blobId": "$${json-unit.ignore}",
+           |                        "threadId": "$${json-unit.ignore}",
+           |                        "size": "$${json-unit.ignore}"
+           |                    },
+           |                    "K89": {
+           |                        "emailSubmissionId": "$${json-unit.ignore}",
+           |                        "emailId": "$${json-unit.ignore}",
+           |                        "blobId": "$${json-unit.ignore}",
+           |                        "threadId": "$${json-unit.ignore}",
+           |                        "size": "$${json-unit.ignore}"
+           |                    }
+           |                }
            |            },
            |            "c1"
            |        ],
@@ -502,8 +488,7 @@ trait LinagoraEmailSendMethodContract {
            |            "c1"
            |        ]
            |    ]
-           |}
-           |""".stripMargin)
+           |}""".stripMargin)
   }
 
   @Test
@@ -679,7 +664,7 @@ trait LinagoraEmailSendMethodContract {
   }
 
   @Test
-  def emailSendShouldNotCreatedWhenMailboxIdNotFound(server: GuiceJamesServer): Unit = {
+  def emailSendShouldNotCreatedWhenMailboxIdInvalid(): Unit = {
     val request: String =
       s"""
          |{
@@ -698,7 +683,7 @@ trait LinagoraEmailSendMethodContract {
          |          "K87": {
          |            "email/create": {
          |              "mailboxIds": {
-         |                "9999": true
+         |                "invalid": true
          |              },
          |              "subject": "World domination",
          |              "htmlBody": [
@@ -757,20 +742,25 @@ trait LinagoraEmailSendMethodContract {
            |            {
            |                "accountId": "$ACCOUNT_ID",
            |                "newState": "$${json-unit.ignore}",
-           |                "notCreated": [
-           |                    [
-           |                        "K87",
-           |                        {
-           |                            "type": "serverFail",
-           |                            "description": "9999 can not be found"
-           |                        }
-           |                    ]
-           |                ]
+           |                "notCreated": {
+           |                    "K87": {
+           |                        "type": "invalidArguments",
+           |                        "description": "$${json-unit.ignore}"
+           |                    }
+           |                }
            |            },
            |            "c1"
            |        ]
            |    ]
            |}""".stripMargin)
+
+    val errorDescription: String = ((Json.parse(response)
+      \\ "methodResponses")
+      .head \\ "description" )
+      .head.asInstanceOf[JsString].value
+
+    assertThat(errorDescription)
+      .contains("'/mailboxIds/invalid' property in EmailSend object is not valid")
   }
 
   @Test
@@ -820,7 +810,7 @@ trait LinagoraEmailSendMethodContract {
     val response: String = `given`
       .body(request)
     .when()
-      .post().prettyPeek()
+      .post()
     .`then`
       .statusCode(HttpStatus.SC_OK)
       .contentType(JSON)
@@ -830,7 +820,28 @@ trait LinagoraEmailSendMethodContract {
 
     assertThatJson(response)
       .isEqualTo(
-        s"""""".stripMargin)
+        s"""{
+           |    "sessionState": "${SESSION_STATE.value}",
+           |    "methodResponses": [
+           |        [
+           |            "Email/send",
+           |            {
+           |                "accountId": "$ACCOUNT_ID",
+           |                "newState": "$${json-unit.ignore}",
+           |                "notCreated": {
+           |                    "K87": {
+           |                        "type": "invalidArguments",
+           |                        "description": "Some unknown properties were specified",
+           |                        "properties": [
+           |                            "unknownProperty"
+           |                        ]
+           |                    }
+           |                }
+           |            },
+           |            "c1"
+           |        ]
+           |    ]
+           |}""".stripMargin)
   }
 
   @Test
@@ -891,7 +902,28 @@ trait LinagoraEmailSendMethodContract {
 
     assertThatJson(response)
       .isEqualTo(
-        s"""""".stripMargin)
+        s"""{
+           |    "sessionState": "${SESSION_STATE.value}",
+           |    "methodResponses": [
+           |        [
+           |            "Email/send",
+           |            {
+           |                "accountId": "$ACCOUNT_ID",
+           |                "newState": "$${json-unit.ignore}",
+           |                "notCreated": {
+           |                    "K87": {
+           |                        "type": "invalidArguments",
+           |                        "description": "Some unknown properties were specified",
+           |                        "properties": [
+           |                            "unknownProperty"
+           |                        ]
+           |                    }
+           |                }
+           |            },
+           |            "c1"
+           |        ]
+           |    ]
+           |}""".stripMargin)
   }
 
   @Test
@@ -968,19 +1000,15 @@ trait LinagoraEmailSendMethodContract {
            |            {
            |                "accountId": "$ACCOUNT_ID",
            |                "newState": "$${json-unit.ignore}",
-           |                "created": [
-           |                    [
-           |                        "K87",
-           |                        {
-           |                            "emailSendId": "$${json-unit.ignore}",
-           |                            "emailSubmissionId": "$${json-unit.ignore}",
-           |                            "messageId": "$${json-unit.ignore}",
-           |                            "blobId": "$${json-unit.ignore}",
-           |                            "threadId": "$${json-unit.ignore}",
-           |                            "size": "$${json-unit.ignore}"
-           |                        }
-           |                    ]
-           |                ]
+           |                "created": {
+           |                    "K87": {
+           |                        "emailSubmissionId": "$${json-unit.ignore}",
+           |                        "emailId": "$${json-unit.ignore}",
+           |                        "blobId": "$${json-unit.ignore}",
+           |                        "threadId": "$${json-unit.ignore}",
+           |                        "size": "$${json-unit.ignore}"
+           |                    }
+           |                }
            |            },
            |            "c1"
            |        ]
@@ -1059,15 +1087,12 @@ trait LinagoraEmailSendMethodContract {
            |            {
            |                "accountId": "$ACCOUNT_ID",
            |                "newState": "$${json-unit.ignore}",
-           |                "notCreated": [
-           |                    [
-           |                        "K87",
-           |                        {
-           |                            "type": "serverFail",
-           |                            "description": "Implicit envelope detection requires a from field"
-           |                        }
-           |                    ]
-           |                ]
+           |                "notCreated": {
+           |                    "K87": {
+           |                        "type": "serverFail",
+           |                        "description": "Implicit envelope detection requires a from field"
+           |                    }
+           |                }
            |            },
            |            "c1"
            |        ]
@@ -1171,8 +1196,7 @@ trait LinagoraEmailSendMethodContract {
 
     assertThatJson(response)
       .isEqualTo(
-        s"""
-           |{
+        s"""{
            |    "sessionState": "${SESSION_STATE.value}",
            |    "methodResponses": [
            |        [
@@ -1180,19 +1204,15 @@ trait LinagoraEmailSendMethodContract {
            |            {
            |                "accountId": "$ACCOUNT_ID",
            |                "newState": "$${json-unit.ignore}",
-           |                "created": [
-           |                    [
-           |                        "K87",
-           |                        {
-           |                            "emailSendId": "$${json-unit.ignore}",
-           |                            "emailSubmissionId": "$${json-unit.ignore}",
-           |                            "messageId": "$${json-unit.ignore}",
-           |                            "blobId": "$${json-unit.ignore}",
-           |                            "threadId": "$${json-unit.ignore}",
-           |                            "size": "$${json-unit.ignore}"
-           |                        }
-           |                    ]
-           |                ]
+           |                "created": {
+           |                    "K87": {
+           |                        "emailSubmissionId": "$${json-unit.ignore}",
+           |                        "emailId": "$${json-unit.ignore}",
+           |                        "blobId": "$${json-unit.ignore}",
+           |                        "threadId": "$${json-unit.ignore}",
+           |                        "size": "$${json-unit.ignore}"
+           |                    }
+           |                }
            |            },
            |            "c1"
            |        ]
@@ -1277,7 +1297,7 @@ trait LinagoraEmailSendMethodContract {
 
     val messageIdResult: String = ((Json.parse(response)
       \\ "methodResponses")
-      .head \\ "messageId" )
+      .head \\ "emailId" )
       .head.asInstanceOf[JsString].value
 
     assertThatJson(response)
@@ -1486,7 +1506,7 @@ trait LinagoraEmailSendMethodContract {
 
     val messageIdResult: String = ((Json.parse(response)
       \\ "methodResponses")
-      .head \\ "messageId" )
+      .head \\ "emailId" )
       .head.asInstanceOf[JsString].value
 
     assertThatJson(response)

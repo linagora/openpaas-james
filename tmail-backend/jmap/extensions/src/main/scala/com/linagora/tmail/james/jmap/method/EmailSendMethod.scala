@@ -22,6 +22,7 @@ import org.apache.james.mailbox.model.{MailboxId, MessageId}
 import org.apache.james.mailbox.{MailboxManager, MailboxSession}
 import org.apache.james.metrics.api.MetricFactory
 import org.apache.james.mime4j.dom.Message
+import org.apache.james.mime4j.message.DefaultMessageWriter
 import org.apache.james.queue.api.MailQueueFactory.SPOOL
 import org.apache.james.queue.api.{MailQueue, MailQueueFactory}
 import org.apache.james.rrt.api.CanSendFrom
@@ -161,9 +162,10 @@ class EmailSendMethod @Inject()(emailSetSerializer: EmailSetSerializer,
   private def parseCreationRequest(jsObject: JsObject): Either[EmailSendCreationRequestInvalidException, EmailSendCreationRequest] =
     EmailSendCreationRequest.validateProperties(jsObject)
       .flatMap(validJson => EmailSendSerializer.deserializeEmailSendCreationRequest(validJson) match {
-        case JsSuccess(createRequest, _) => createRequest.toModel(emailSetSerializer)
+        case JsSuccess(createRequest, _) => createRequest.validate()
         case JsError(errors) => Left(EmailSendCreationRequestInvalidException.parse(errors))
       })
+      .flatMap(createRequestRaw => createRequestRaw.toModel(emailSetSerializer))
 
   def createEmail(clientId: EmailSendCreationId,
                   mailboxSession: MailboxSession,
@@ -182,11 +184,10 @@ class EmailSendMethod @Inject()(emailSetSerializer: EmailSetSerializer,
 
   def createEmailSubmission(mailboxSession: MailboxSession,
                             emailCreationResponse: EmailCreationResponse,
-                            originalMessage: Message,
+                            originalMessage: Array[Byte],
                             request: EmailSubmissionCreationRequest): SMono[EmailSendCreationResponse] = {
     val emailId: MessageId = emailCreationResponse.id
     val submissionId: EmailSubmissionId = EmailSubmissionId.generate
-    val emailSendId: EmailSendId = EmailSendId.generate
     for {
       message <- SMono.fromTry(toMimeMessage(submissionId.value, originalMessage))
       envelope <- SMono.fromTry(resolveEnvelope(message, request.envelope))
@@ -204,16 +205,15 @@ class EmailSendMethod @Inject()(emailSetSerializer: EmailSetSerializer,
       _ <- SMono(queue.enqueueReactive(mail)).`then`(SMono.just(submissionId))
     } yield {
       EmailSendCreationResponse(
-        emailSendId = emailSendId,
         emailSubmissionId = submissionId,
-        messageId = emailId,
+        emailId = emailId,
         blobId = emailCreationResponse.blobId,
         threadId = emailCreationResponse.threadId,
         size = emailCreationResponse.size)
     }
   }
 
-  def toMimeMessage(name: String, message: Message): Try[MimeMessageWrapper] = {
+  def toMimeMessage(name: String, message: Array[Byte]): Try[MimeMessageWrapper] = {
     val source: MimeMessageSource = MimeMessageSourceImpl(name, message)
     Try(new MimeMessageWrapper(source))
       .recover(e => {
@@ -244,17 +244,18 @@ class EmailSendMethod @Inject()(emailSetSerializer: EmailSetSerializer,
                      mailboxIds: List[MailboxId]): SMono[EmailSetCreationSuccess] =
     for {
       mailbox <- SMono(mailboxManager.getMailboxReactive(mailboxIds.head, mailboxSession))
+      messageAsBytes = DefaultMessageWriter.asBytes(message)
       appendCommand = AppendCommand.builder()
         .recent()
         .withFlags(request.keywords.map(_.asFlags).getOrElse(new Flags()))
         .withInternalDate(Date.from(request.receivedAt.getOrElse(UTCDate(ZonedDateTime.now())).asUTC.toInstant))
-        .build(message)
+        .build(messageAsBytes)
       appendResult <- SMono(mailbox.appendMessageReactive(appendCommand, mailboxSession))
     } yield {
       val blobId: Option[BlobId] = BlobId.of(appendResult.getId.getMessageId).toOption
       val threadId: ThreadId = ThreadId.fromJava(appendResult.getThreadId)
       EmailSetCreationSuccess(clientId,
         EmailCreationResponse(appendResult.getId.getMessageId, blobId, threadId, Email.sanitizeSize(appendResult.getSize)),
-        message)
+        messageAsBytes)
     }
 }

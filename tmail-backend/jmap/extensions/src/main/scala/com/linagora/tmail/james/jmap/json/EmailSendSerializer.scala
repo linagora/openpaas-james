@@ -2,7 +2,8 @@ package com.linagora.tmail.james.jmap.json
 
 import com.linagora.tmail.james.jmap.model.{EmailSendCreationId, EmailSendCreationRequestRaw, EmailSendCreationResponse, EmailSendId, EmailSendRequest, EmailSendResponse, EmailSubmissionCreationRequest}
 import org.apache.james.core.MailAddress
-import org.apache.james.jmap.core.{Id, UuidState}
+import org.apache.james.jmap.core.{Id, SetError, UuidState}
+import org.apache.james.jmap.json.mapWrites
 import org.apache.james.jmap.mail.{BlobId, EmailSubmissionAddress, EmailSubmissionId, Envelope, ThreadId}
 import org.apache.james.mailbox.model.MessageId
 import play.api.libs.functional.syntax.toFunctionalBuilderOps
@@ -43,6 +44,13 @@ object EmailSendSerializer {
   private implicit val emailSubmissionIdWrites: Writes[EmailSubmissionId] = Json.valueWrites[EmailSubmissionId]
   private implicit val messageIdWrites: Writes[MessageId] = messageId => JsString(messageId.serialize)
   private implicit val emailSendCreationResponseWrites: Writes[EmailSendCreationResponse] = Json.writes[EmailSendCreationResponse]
+
+  private implicit val emailSendCreatedMapWrites: Writes[Map[EmailSendCreationId, EmailSendCreationResponse]] =
+    mapWrites[EmailSendCreationId, EmailSendCreationResponse](creationId => creationId.id.value, emailSendCreationResponseWrites)
+
+  private implicit val emailSendNotCreatedMapWrites: Writes[Map[EmailSendCreationId, SetError]] =
+    mapWrites[EmailSendCreationId, SetError](creationId => creationId.id.value, setErrorWrites)
+
   private implicit val emailSendResponseWrites: Writes[EmailSendResponse] = Json.writes[EmailSendResponse]
 
   def deserializeEmailSendCreationRequest(input: JsValue): JsResult[EmailSendCreationRequestRaw] =
