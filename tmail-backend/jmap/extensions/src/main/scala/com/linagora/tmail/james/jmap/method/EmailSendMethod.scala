@@ -5,7 +5,7 @@ import com.google.inject.{AbstractModule, Scopes}
 import com.linagora.tmail.james.jmap.json.EmailSendSerializer
 import com.linagora.tmail.james.jmap.method.CapabilityIdentifier.LINAGORA_PGP
 import com.linagora.tmail.james.jmap.model.EmailSubmissionHelper.resolveEnvelope
-import com.linagora.tmail.james.jmap.model.{EmailSendCreationId, EmailSendCreationRequest, EmailSendCreationRequestInvalidException, EmailSendCreationResponse, EmailSendId, EmailSendRequest, EmailSendResults, EmailSetCreationFailure, EmailSetCreationResult, EmailSetCreationSuccess, EmailSubmissionCreationRequest}
+import com.linagora.tmail.james.jmap.model.{EmailSendCreationId, EmailSendCreationRequest, EmailSendCreationRequestInvalidException, EmailSendCreationResponse, EmailSendId, EmailSendRequest, EmailSendResults, EmailSetCreationFailure, EmailSetCreationResult, EmailSetCreationSuccess, EmailSubmissionCreationRequest, MimeMessageSourceImpl}
 import eu.timepit.refined.auto._
 import org.apache.james.core.{MailAddress, Username}
 import org.apache.james.jmap.core.CapabilityIdentifier.{CapabilityIdentifier, EMAIL_SUBMISSION, JMAP_CORE, JMAP_MAIL}
@@ -16,7 +16,7 @@ import org.apache.james.jmap.mail.{BlobId, Email, EmailCreationRequest, EmailCre
 import org.apache.james.jmap.method.EmailSubmissionSetMethod.{LOGGER, MAIL_METADATA_USERNAME_ATTRIBUTE}
 import org.apache.james.jmap.method.{EmailSetMethod, ForbiddenFromException, ForbiddenMailFromException, InvocationWithContext, Method, MethodRequiringAccountId, NoRecipientException}
 import org.apache.james.jmap.routes.{BlobResolvers, ProcessingContext, SessionSupplier}
-import org.apache.james.lifecycle.api.Startable
+import org.apache.james.lifecycle.api.{LifecycleUtil, Startable}
 import org.apache.james.mailbox.MessageManager.AppendCommand
 import org.apache.james.mailbox.model.{MailboxId, MessageId}
 import org.apache.james.mailbox.{MailboxManager, MailboxSession}
@@ -25,7 +25,7 @@ import org.apache.james.mime4j.dom.Message
 import org.apache.james.queue.api.MailQueueFactory.SPOOL
 import org.apache.james.queue.api.{MailQueue, MailQueueFactory}
 import org.apache.james.rrt.api.CanSendFrom
-import org.apache.james.server.core.{MailImpl, MimeMessageWrapper}
+import org.apache.james.server.core.{MailImpl, MimeMessageSource, MimeMessageWrapper}
 import org.apache.james.util.html.HtmlTextExtractor
 import org.apache.james.utils.{InitializationOperation, InitilizationOperationBuilder}
 import org.apache.mailet.{Attribute, AttributeValue}
@@ -214,7 +214,12 @@ class EmailSendMethod @Inject()(emailSetSerializer: EmailSetSerializer,
   }
 
   def toMimeMessage(name: String, message: Message): Try[MimeMessageWrapper] = {
-    ??? //todo
+    val source: MimeMessageSource = MimeMessageSourceImpl(name, message)
+    Try(new MimeMessageWrapper(source))
+      .recover(e => {
+        LifecycleUtil.dispose(source)
+        throw e
+      })
   }
 
   private def validate(session: MailboxSession)(mimeMessage: MimeMessage, envelope: Envelope): Try[MimeMessage] = {

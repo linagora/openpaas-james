@@ -16,8 +16,11 @@ import org.apache.james.jmap.method.WithAccountId
 import org.apache.james.mailbox.MessageManager.AppendCommand
 import org.apache.james.mailbox.model.MessageId
 import org.apache.james.mime4j.dom.Message
+import org.apache.james.mime4j.message.DefaultMessageWriter
+import org.apache.james.server.core.MimeMessageSource
 import play.api.libs.json.{JsError, JsObject, JsPath, JsSuccess, JsonValidationError}
 
+import java.io.{ByteArrayInputStream, InputStream}
 import java.time.ZonedDateTime
 import java.util.{Date, UUID}
 import javax.mail.Flags
@@ -71,7 +74,7 @@ case class EmailSendRequest(accountId: AccountId,
           Left(new IllegalArgumentException(s"${creationId.id} cannot be referenced in current method call"))
         })
     } else {
-      Left(new IllegalArgumentException(s"${creationId.id} cannot be retrieved as storage for EmailSubmission is not yet implemented"))
+      Left(new IllegalArgumentException(s"${creationId.id} cannot be retrieved as storage for Email/send is not yet implemented"))
     }
   }
 
@@ -268,3 +271,10 @@ case class EmailSendResponse(accountId: AccountId,
                              newState: UuidState,
                              created: Option[Map[EmailSendCreationId, EmailSendCreationResponse]],
                              notCreated: Option[Map[EmailSendCreationId, SetError]])
+
+case class MimeMessageSourceImpl(name: String, message: Message) extends MimeMessageSource {
+
+  override def getSourceId: String = name
+
+  override def getInputStream: InputStream = new ByteArrayInputStream(DefaultMessageWriter.asBytes(message))
+}
